@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ..._auth.cookie_policy import MINIMUM_REQUIRED_COOKIES
 from ...config import get_base_host, get_base_url
 from ...io import atomic_write_json
 from ...paths import get_browser_profile_dir, get_storage_path
@@ -699,7 +700,16 @@ def run_playwright_login(plan: PlaywrightLoginPlan, io: LoginIO) -> None:
                         logger.debug("Non-retryable error: %s", error_str)
                         raise
 
-            if url_matches_base_host(page.url):
+            def _signed_in() -> bool:
+                # Host match alone is not proof of a session: signed out, the
+                # NotebookLM host serves a public landing page on the same host.
+                # Require the Google session cookies too.
+                if not url_matches_base_host(page.url):
+                    return False
+                names = {c["name"] for c in context.cookies()}
+                return MINIMUM_REQUIRED_COOKIES.issubset(names)
+
+            if _signed_in():
                 # Persistent browser profile already has a valid session.
                 io.emit("[green]Already logged in.[/green]")
             else:
@@ -708,7 +718,11 @@ def run_playwright_login(plan: PlaywrightLoginPlan, io: LoginIO) -> None:
                 io.emit("2. Authentication will be saved automatically once login is detected\n")
                 io.emit("[dim]Waiting for login (up to 5 minutes)...[/dim]")
                 try:
-                    page.wait_for_url(f"{get_base_url()}/**", timeout=300_000)
+                    deadline = time.monotonic() + 300
+                    while not _signed_in():
+                        if time.monotonic() >= deadline:
+                            raise PlaywrightTimeout("login not detected")
+                        time.sleep(1)
                 except PlaywrightTimeout:
                     io.emit(
                         "[red]Login not detected within 5 minutes.[/red]\n"
