@@ -719,9 +719,20 @@ def run_playwright_login(plan: PlaywrightLoginPlan, io: LoginIO) -> None:
                 io.emit("[dim]Waiting for login (up to 5 minutes)...[/dim]")
                 try:
                     deadline = time.monotonic() + 300
+                    last_reload = time.monotonic()
                     while not _signed_in():
-                        if time.monotonic() >= deadline:
+                        now = time.monotonic()
+                        if now >= deadline:
                             raise PlaywrightTimeout("login not detected")
+                        # Signed in (SID) but the rotating PSIDTS cookie has not
+                        # been issued yet: reload so Google sets it.
+                        if now - last_reload >= 10 and url_matches_base_host(page.url):
+                            if "SID" in {c["name"] for c in context.cookies()}:
+                                try:
+                                    page.reload(wait_until="commit")
+                                except PlaywrightError:
+                                    pass
+                            last_reload = now
                         time.sleep(1)
                 except PlaywrightTimeout:
                     io.emit(
